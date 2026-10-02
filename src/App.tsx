@@ -45,15 +45,29 @@ interface CreatorSummary {
   followers: number;
   followingCount?: number;
   totalLikes?: number;
+  videoCount?: number;
+  relationBadge?: string;
   bio?: string;
 }
 
 type ScreenMode =
   | 'feed'
+  | 'explore'
+  | 'inbox'
   | 'search-input'
   | 'search-results'
   | 'my-profile'
   | 'creator-profile';
+
+const EXPLORE_CATEGORIES = [
+  { id: 'all', label: 'All', query: 'Atif Aslam Sidhu Moose Wala' },
+  { id: 'singing', label: 'Singing & Dancing', query: 'Diljit Dosanjh Karan Aujla' },
+  { id: 'comedy', label: 'Comedy', query: 'Badshah Honey Singh' },
+  { id: 'sports', label: 'Sports', query: 'Ali Zafar Cricket Anthem' },
+  { id: 'cars', label: 'Cars', query: 'Imran Khan AP Dhillon' },
+  { id: 'shayari', label: 'Shayari & Soul', query: 'Rahat Fateh Ali Khan B Praak' },
+  { id: 'daily', label: 'Daily Life', query: 'Arijit Singh Darshan Raval' },
+];
 
 const TOP_TABS = [
   { id: 'comedy', label: 'Following' },
@@ -92,6 +106,9 @@ export default function App() {
   const [searchInput, setSearchInput] = useState('');
   const [activeSearchQuery, setActiveSearchQuery] = useState('');
   const [suggestKeywords, setSuggestKeywords] = useState<string[]>([]);
+  const [suggestUsers, setSuggestUsers] = useState<
+    Array<{ name: string; handle: string; avatar: string; followers: number; badge: string }>
+  >([]);
   const [searchResultVideos, setSearchResultVideos] = useState<VideoFeedItem[]>([]);
   const [searchResultUsers, setSearchResultUsers] = useState<CreatorSummary[]>([]);
   const [searchTab, setSearchTab] = useState<'top' | 'users' | 'videos' | 'sounds' | 'hashtags'>('top');
@@ -101,6 +118,30 @@ export default function App() {
   const [viewedCreator, setViewedCreator] = useState<CreatorSummary | null>(null);
   const [creatorVideos, setCreatorVideos] = useState<VideoFeedItem[]>([]);
   const [isLoadingCreator, setIsLoadingCreator] = useState(false);
+
+  // Explore Visual Discovery State
+  const [exploreCategory, setExploreCategory] = useState('all');
+  const [exploreVideos, setExploreVideos] = useState<VideoFeedItem[]>([]);
+  const [isLoadingExplore, setIsLoadingExplore] = useState(false);
+
+  // People You May Know / Contacts Directory (30+ creators for Inbox & Friends)
+  const [peopleYouMayKnow, setPeopleYouMayKnow] = useState<
+    Array<{ name: string; handle: string; avatar: string; followers: number; badge: string }>
+  >([]);
+
+  // In-App Offline Videos Cache State (Stored inside App CacheStorage — NOT phone gallery!)
+  const [isOfflineModalOpen, setIsOfflineModalOpen] = useState(false);
+  const [offlineTargetCount, setOfflineTargetCount] = useState<15 | 30 | 50 | 100>(15);
+  const [offlineVideosList, setOfflineVideosList] = useState<VideoFeedItem[]>(() => {
+    try {
+      const raw = localStorage.getItem('turbotok_offline_manifest');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isDownloadingOffline, setIsDownloadingOffline] = useState(false);
+  const [offlineDoneCount, setOfflineDoneCount] = useState(0);
 
   // Real TikTok Account State (Phone Number + @Username + Cloud Persistence)
   const [authToken, setAuthToken] = useState<string>(() => {
@@ -453,27 +494,169 @@ export default function App() {
     }
   }, [activeIndex, isMuted, activeScreen, isAppInForeground, boostVideoAudio]);
 
-  // Clean Live Search Autocomplete
+  // Clean Live Search Autocomplete (Keywords + Social Graph User Profiles!)
   useEffect(() => {
     if (activeScreen !== 'search-input') return;
     const q = searchInput.trim();
     if (!q) {
       setSuggestKeywords([]);
+      setSuggestUsers([]);
       return;
     }
 
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/search/suggest?q=${encodeURIComponent(q)}`);
+        const res = await fetch(`/api/search/suggest?q=${encodeURIComponent(q)}`, {
+          headers: { 'x-auth-token': authToken },
+        });
         if (res.ok) {
           const data = await res.json();
           setSuggestKeywords(Array.isArray(data.keywords) ? data.keywords : []);
+          setSuggestUsers(Array.isArray(data.users) ? data.users : []);
         }
       } catch {}
-    }, 120);
+    }, 100);
 
     return () => clearTimeout(timer);
-  }, [searchInput, activeScreen]);
+  }, [searchInput, activeScreen, authToken]);
+
+  // Load TikTok Explore 2-Column Discovery Grid
+  const loadExploreCategory = useCallback(async (catId: string) => {
+    setExploreCategory(catId);
+    setIsLoadingExplore(true);
+    try {
+      const catObj = EXPLORE_CATEGORIES.find((c) => c.id === catId) || EXPLORE_CATEGORIES[0];
+      if (catId === 'all') {
+        const res = await fetch(`/api/feed?category=for-you&page=1&t=${Date.now()}`);
+        const data = await res.json();
+        setExploreVideos(Array.isArray(data.videos) ? data.videos : []);
+      } else {
+        const res = await fetch(`/api/search/results?q=${encodeURIComponent(catObj.query)}`);
+        const data = await res.json();
+        setExploreVideos(Array.isArray(data.videos) ? data.videos : []);
+      }
+    } catch {
+      setExploreVideos([]);
+    } finally {
+      setIsLoadingExplore(false);
+    }
+  }, []);
+
+  // Load 30+ People You May Know / Contacts Directory
+  useEffect(() => {
+    fetch('/api/people-you-may-know')
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.people)) {
+          setPeopleYouMayKnow(data.people);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // In-App Offline Videos Downloader (Saves inside App CacheStorage — NOT Phone Gallery!)
+  const handleDownloadOfflinePack = async (targetCount: number) => {
+    if (isDownloadingOffline) return;
+    setIsDownloadingOffline(true);
+    setOfflineDoneCount(0);
+
+    try {
+      // Gather candidate direct MP4/M4V videos from current feed + additional pages
+      let pool: VideoFeedItem[] = [...videos.filter((v) => v.sourceEngine !== 'youtube-short')];
+      let p = 2;
+      while (pool.length < targetCount && p <= 7) {
+        try {
+          const r = await fetch(`/api/feed?category=for-you&page=${p}&t=${Date.now()}`);
+          const d = await r.json();
+          if (Array.isArray(d.videos)) {
+            for (const item of d.videos) {
+              if (
+                item.sourceEngine !== 'youtube-short' &&
+                !pool.some((existing) => existing.videoUrl === item.videoUrl)
+              ) {
+                pool.push(item);
+              }
+            }
+          }
+        } catch {}
+        p++;
+      }
+
+      const toCache = pool.slice(0, targetCount);
+      const cache =
+        'caches' in window ? await caches.open('turbotok-inapp-offline-v1') : null;
+      const savedList: VideoFeedItem[] = [];
+
+      for (let i = 0; i < toCache.length; i++) {
+        const vid = toCache[i];
+        try {
+          if (cache) {
+            const resp = await fetch(vid.videoUrl);
+            if (resp.ok) {
+              await cache.put(vid.videoUrl, resp.clone());
+            }
+            if (vid.posterUrl) {
+              const pResp = await fetch(vid.posterUrl).catch(() => null);
+              if (pResp && pResp.ok) {
+                await cache.put(vid.posterUrl, pResp.clone());
+              }
+            }
+          }
+          savedList.push(vid);
+          setOfflineDoneCount(i + 1);
+        } catch {}
+      }
+
+      setOfflineVideosList(savedList);
+      try {
+        localStorage.setItem('turbotok_offline_manifest', JSON.stringify(savedList));
+      } catch {}
+      showToast(`${savedList.length} videos saved inside app for Offline watching!`);
+    } catch {
+      showToast('Could not complete offline caching.');
+    } finally {
+      setIsDownloadingOffline(false);
+    }
+  };
+
+  const handleWatchOfflineVideosNow = async () => {
+    if (offlineVideosList.length === 0) return;
+    const hydrated: VideoFeedItem[] = [];
+    const cache =
+      'caches' in window ? await caches.open('turbotok-inapp-offline-v1') : null;
+
+    for (const item of offlineVideosList) {
+      let localPlayUrl = item.videoUrl;
+      if (cache) {
+        const matched = await cache.match(item.videoUrl);
+        if (matched) {
+          const blob = await matched.blob();
+          localPlayUrl = URL.createObjectURL(blob);
+        }
+      }
+      hydrated.push({
+        ...item,
+        videoUrl: localPlayUrl,
+        socialBadge: '⚡ Offline Video · No Internet Needed',
+      });
+    }
+
+    setIsOfflineModalOpen(false);
+    playVideosListAt(hydrated, 0);
+    showToast('Playing Offline Videos (No Internet Needed)');
+  };
+
+  const handleClearOfflineCache = async () => {
+    if ('caches' in window) {
+      await caches.delete('turbotok-inapp-offline-v1').catch(() => {});
+    }
+    try {
+      localStorage.removeItem('turbotok_offline_manifest');
+    } catch {}
+    setOfflineVideosList([]);
+    setOfflineDoneCount(0);
+    showToast('Offline video cache cleared');
+  };
 
   // Execute Search -> Opens 2-Column TikTok Search Results Page
   const executeSearchToGrid = async (q: string) => {
@@ -487,7 +670,9 @@ export default function App() {
     setIsSearchingResults(true);
 
     try {
-      const res = await fetch(`/api/search/results?q=${encodeURIComponent(cleaned)}`);
+      const res = await fetch(`/api/search/results?q=${encodeURIComponent(cleaned)}`, {
+        headers: { 'x-auth-token': authToken },
+      });
       const data = await res.json();
       setSearchResultVideos(Array.isArray(data.videos) ? data.videos : []);
       setSearchResultUsers(Array.isArray(data.users) ? data.users : []);
@@ -1314,6 +1499,12 @@ export default function App() {
                             {/* Bottom Creator Info */}
                             <div className="absolute inset-x-0 bottom-0 z-15 pt-16 bg-gradient-to-t from-black/90 via-black/45 to-transparent pointer-events-none">
                               <div className="px-3.5 pr-18 pb-2.5">
+                                {video.socialBadge && (
+                                  <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 mb-1.5 rounded-md bg-white/20 backdrop-blur-md text-[11px] font-semibold text-white">
+                                    <span>👥</span>
+                                    <span>{video.socialBadge}</span>
+                                  </div>
+                                )}
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -1453,17 +1644,121 @@ export default function App() {
                 </button>
               </form>
 
-              <div className="flex-1 overflow-y-auto px-5 py-2 space-y-4">
+              <div className="flex-1 overflow-y-auto px-4 py-2 space-y-3">
+                {/* Live Matched Social Graph & Followed Profiles While Typing */}
+                {suggestUsers.length > 0 && (
+                  <div className="pb-2 border-b border-black/10 space-y-2.5">
+                    <p className="text-[11px] font-bold text-[#8A8B91] uppercase tracking-wider">
+                      Accounts · Following & Friends
+                    </p>
+                    {suggestUsers.map((u) => (
+                      <div
+                        key={u.handle}
+                        onClick={() => openCreatorProfile(u.name, u.handle, u.avatar)}
+                        className="flex items-center justify-between gap-3 py-1 cursor-pointer"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {u.avatar ? (
+                            <img
+                              src={u.avatar}
+                              alt={u.name}
+                              referrerPolicy="no-referrer"
+                              className="w-10 h-10 rounded-full object-cover bg-gray-200 shrink-0"
+                            />
+                          ) : (
+                            <div className="w-10 h-10 rounded-full bg-[#F1F1F2] flex items-center justify-center font-bold text-xs text-[#161823] shrink-0">
+                              {u.name.slice(0, 2).toUpperCase()}
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <p className="text-sm font-bold text-[#161823] truncate">{u.name}</p>
+                            <p className="text-xs text-[#8A8B91] truncate">
+                              @{u.handle} · {formatCompactCount(u.followers)} followers
+                            </p>
+                            <p className="text-[11px] font-semibold text-[#FE2C55] truncate">
+                              {u.badge}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="px-3 py-1 rounded-md bg-[#F1F1F2] text-xs font-semibold text-[#161823]">
+                          Profile
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Keyword Suggestions */}
                 {suggestKeywords.map((kw) => (
                   <button
                     key={kw}
                     type="button"
                     onClick={() => executeSearchToGrid(kw)}
-                    className="w-full py-1.5 text-left text-[16px] font-normal text-[#161823] hover:opacity-70 block cursor-pointer"
+                    className="w-full py-1.5 text-left text-[15.5px] font-normal text-[#161823] hover:opacity-70 flex items-center gap-2.5 cursor-pointer"
                   >
-                    {kw}
+                    <svg viewBox="0 0 20 20" fill="none" className="w-4 h-4 text-[#8A8B91] shrink-0">
+                      <circle cx="9" cy="9" r="6" stroke="currentColor" strokeWidth="1.8" />
+                      <path d="M13.5 13.5L17 17" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                    </svg>
+                    <span className="truncate">{kw}</span>
                   </button>
                 ))}
+
+                {/* Default People You May Know / Following Quick Search when input is empty */}
+                {!searchInput.trim() && peopleYouMayKnow.length > 0 && (
+                  <div className="pt-2 space-y-3">
+                    <p className="text-xs font-bold text-[#8A8B91]">
+                      People you may know · Following & Contacts
+                    </p>
+                    {peopleYouMayKnow.slice(0, 8).map((p) => (
+                      <div
+                        key={p.handle}
+                        onClick={() => openCreatorProfile(p.name, p.handle, p.avatar)}
+                        className="flex items-center justify-between gap-3 py-1 cursor-pointer"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {p.avatar ? (
+                            <img
+                              src={p.avatar}
+                              alt={p.name}
+                              referrerPolicy="no-referrer"
+                              className="w-10 h-10 rounded-full object-cover bg-gray-200 shrink-0"
+                            />
+                          ) : (
+                            <div className="w-10 h-10 rounded-full bg-[#F1F1F2] flex items-center justify-center font-bold text-xs text-[#161823] shrink-0">
+                              {p.name.slice(0, 2).toUpperCase()}
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <p className="text-sm font-bold text-[#161823] truncate">{p.name}</p>
+                            <p className="text-xs text-[#8A8B91] truncate">
+                              @{p.handle} · {formatCompactCount(p.followers)} followers
+                            </p>
+                            <p className="text-[11px] font-medium text-[#FE2C55] truncate">
+                              {p.badge}
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleFollowCreator(p.handle, p.name);
+                          }}
+                          className={`px-3.5 py-1.5 rounded-md text-xs font-semibold cursor-pointer ${
+                            followedHandles[p.handle] || followedHandles[`@${p.handle}`]
+                              ? 'bg-[#F1F1F2] text-[#161823]'
+                              : 'bg-[#FE2C55] text-white'
+                          }`}
+                        >
+                          {followedHandles[p.handle] || followedHandles[`@${p.handle}`]
+                            ? 'Following'
+                            : 'Follow'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1532,7 +1827,13 @@ export default function App() {
                 {(
                   [
                     { id: 'top', label: 'Top' },
-                    { id: 'users', label: 'Users' },
+                    {
+                      id: 'users',
+                      label:
+                        searchResultUsers.length > 0
+                          ? `Users (${searchResultUsers.length})`
+                          : 'Users',
+                    },
                     { id: 'videos', label: 'Videos' },
                     { id: 'sounds', label: 'Sounds' },
                     { id: 'hashtags', label: 'Hashtags' },
@@ -1566,42 +1867,136 @@ export default function App() {
                   </div>
                 ) : searchTab === 'users' ? (
                   <div className="divide-y divide-black/5 px-2">
-                    {searchResultUsers.map((u) => (
-                      <div
-                        key={u.handle}
-                        onClick={() => openCreatorProfile(u.name, u.handle, u.avatar)}
-                        className="py-3 flex items-center justify-between gap-3 cursor-pointer"
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <img
-                            src={u.avatar}
-                            alt={u.name}
-                            referrerPolicy="no-referrer"
-                            className="w-12 h-12 rounded-full object-cover bg-gray-200 shrink-0"
-                          />
-                          <div className="min-w-0">
-                            <p className="text-sm font-bold text-[#161823] truncate">{u.name}</p>
-                            <p className="text-xs text-[#8A8B91] truncate">@{u.handle}</p>
-                            <p className="text-[11px] text-[#8A8B91]">
-                              {formatCompactCount(u.followers)} Followers
-                            </p>
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openCreatorProfile(u.name, u.handle, u.avatar);
-                          }}
-                          className="px-4 py-1.5 rounded-md bg-[#FE2C55] text-white text-xs font-semibold cursor-pointer shrink-0"
+                    {searchResultUsers.map((u) => {
+                      const isFollowingU = Boolean(
+                        followedHandles[u.handle] || followedHandles[`@${u.handle}`]
+                      );
+                      return (
+                        <div
+                          key={u.handle}
+                          onClick={() => openCreatorProfile(u.name, u.handle, u.avatar)}
+                          className="py-3 flex items-center justify-between gap-3 cursor-pointer"
                         >
-                          View Profile
-                        </button>
-                      </div>
-                    ))}
+                          <div className="flex items-center gap-3 min-w-0">
+                            {u.avatar ? (
+                              <img
+                                src={u.avatar}
+                                alt={u.name}
+                                referrerPolicy="no-referrer"
+                                className="w-12 h-12 rounded-full object-cover bg-gray-200 shrink-0"
+                              />
+                            ) : (
+                              <div className="w-12 h-12 rounded-full bg-[#F1F1F2] flex items-center justify-center font-bold text-sm text-[#161823] shrink-0">
+                                {u.name.slice(0, 2).toUpperCase()}
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <p className="text-sm font-bold text-[#161823] truncate">{u.name}</p>
+                              <p className="text-xs text-[#8A8B91] truncate">
+                                @{u.handle} · {formatCompactCount(u.followers)} Followers
+                              </p>
+                              {u.relationBadge && (
+                                <p className="text-[11px] font-medium text-[#FE2C55] truncate">
+                                  {u.relationBadge}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleFollowCreator(u.handle, u.name);
+                            }}
+                            className={`px-4 py-1.5 rounded-md text-xs font-semibold cursor-pointer shrink-0 ${
+                              isFollowingU
+                                ? 'bg-[#F1F1F2] text-[#161823]'
+                                : 'bg-[#FE2C55] text-white'
+                            }`}
+                          >
+                            {isFollowingU ? 'Following' : 'Follow'}
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-3">
+                    {/* TOP TAB USERS SECTION: Shows matching TikTok Profiles right at the top of Search Results! */}
+                    {searchTab === 'top' && searchResultUsers.length > 0 && (
+                      <div className="px-2 pt-1 pb-3 border-b border-black/10">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-[13.5px] font-bold text-[#161823]">
+                            Users · Following & People You May Know ({searchResultUsers.length})
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setSearchTab('users')}
+                            className="text-xs font-bold text-[#FE2C55] hover:underline cursor-pointer"
+                          >
+                            See all ({searchResultUsers.length}) →
+                          </button>
+                        </div>
+                        <div className="space-y-2.5">
+                          {searchResultUsers.slice(0, 6).map((u) => {
+                            const isFollowingU = Boolean(
+                              followedHandles[u.handle] || followedHandles[`@${u.handle}`]
+                            );
+                            return (
+                              <div
+                                key={u.handle}
+                                onClick={() => openCreatorProfile(u.name, u.handle, u.avatar)}
+                                className="flex items-center justify-between gap-3 py-1 cursor-pointer"
+                              >
+                                <div className="flex items-center gap-3 min-w-0">
+                                  {u.avatar ? (
+                                    <img
+                                      src={u.avatar}
+                                      alt={u.name}
+                                      referrerPolicy="no-referrer"
+                                      className="w-12 h-12 rounded-full object-cover bg-gray-200 shrink-0"
+                                    />
+                                  ) : (
+                                    <div className="w-12 h-12 rounded-full bg-[#F1F1F2] flex items-center justify-center font-bold text-sm text-[#161823] shrink-0">
+                                      {u.name.slice(0, 2).toUpperCase()}
+                                    </div>
+                                  )}
+                                  <div className="min-w-0">
+                                    <p className="text-[14px] font-bold text-[#161823] truncate">
+                                      {u.name}
+                                    </p>
+                                    <p className="text-xs text-[#8A8B91] truncate">
+                                      @{u.handle} · {formatCompactCount(u.followers)} Followers
+                                    </p>
+                                    {u.relationBadge && (
+                                      <p className="text-[11px] font-medium text-[#FE2C55] truncate">
+                                        {u.relationBadge}
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleFollowCreator(u.handle, u.name);
+                                  }}
+                                  className={`px-4 py-1.5 rounded-md text-xs font-semibold cursor-pointer shrink-0 ${
+                                    isFollowingU
+                                      ? 'bg-[#F1F1F2] text-[#161823]'
+                                      : 'bg-[#FE2C55] text-white'
+                                  }`}
+                                >
+                                  {isFollowingU ? 'Following' : 'Follow'}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-2">
                     {searchResultVideos.map((vid, idx) => (
                       <div key={vid.id} className="flex flex-col pb-2">
                         <div
@@ -1669,6 +2064,7 @@ export default function App() {
                         </div>
                       </div>
                     ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -1754,8 +2150,12 @@ export default function App() {
                 </div>
 
                 {viewedCreator.bio && (
-                  <p className="text-[13px] text-[#161823] mb-3 max-w-[260px]">{viewedCreator.bio}</p>
+                  <p className="text-[13px] text-[#161823] mb-2 max-w-[260px]">{viewedCreator.bio}</p>
                 )}
+
+                <p className="text-[11.5px] font-semibold text-[#FE2C55] mb-3">
+                  Followed by @barkatalu23 · People you may know
+                </p>
 
                 <button
                   type="button"
@@ -1769,9 +2169,55 @@ export default function App() {
                 >
                   {followedHandles[viewedCreator.handle] ||
                   followedHandles[`@${viewedCreator.handle}`]
-                    ? 'Following'
+                    ? 'Friends · Following'
                     : 'Follow'}
                 </button>
+
+                {/* Mutual Following / People You May Know Horizontal Strip on Creator Profile */}
+                {peopleYouMayKnow.length > 0 && (
+                  <div className="w-full mt-4 pt-3 border-t border-black/10 text-left">
+                    <p className="text-[11.5px] font-bold text-[#8A8B91] mb-2 px-1">
+                      Suggested · Following & People you may know
+                    </p>
+                    <div className="flex items-center gap-2.5 overflow-x-auto no-scrollbar pb-1">
+                      {peopleYouMayKnow
+                        .filter(
+                          (p) =>
+                            p.handle.toLowerCase() !== viewedCreator.handle.toLowerCase()
+                        )
+                        .slice(0, 10)
+                        .map((p) => (
+                          <div
+                            key={p.handle}
+                            onClick={() => openCreatorProfile(p.name, p.handle, p.avatar)}
+                            className="w-28 shrink-0 p-2.5 rounded-xl bg-[#F8F8F9] border border-black/5 flex flex-col items-center text-center cursor-pointer"
+                          >
+                            {p.avatar ? (
+                              <img
+                                src={p.avatar}
+                                alt={p.name}
+                                referrerPolicy="no-referrer"
+                                className="w-11 h-11 rounded-full object-cover mb-1.5 bg-gray-200"
+                              />
+                            ) : (
+                              <div className="w-11 h-11 rounded-full bg-[#F1F1F2] flex items-center justify-center font-bold text-xs text-[#161823] mb-1.5">
+                                {p.name.slice(0, 2).toUpperCase()}
+                              </div>
+                            )}
+                            <p className="text-[11.5px] font-bold text-[#161823] truncate w-full">
+                              {p.name}
+                            </p>
+                            <p className="text-[10px] text-[#8A8B91] truncate w-full">
+                              @{p.handle}
+                            </p>
+                            <p className="text-[9.5px] font-semibold text-[#FE2C55] truncate w-full mt-0.5">
+                              {p.badge}
+                            </p>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="h-10 border-t border-b border-black/10 flex items-center justify-around shrink-0">
@@ -2134,7 +2580,7 @@ export default function App() {
                     <div className="flex items-center justify-center gap-2.5 w-full max-w-[340px]">
                       <button
                         type="button"
-                        onClick={() => setIsUploadOpen(true)}
+                        onClick={() => setIsOfflineModalOpen(true)}
                         className="flex-1 py-2 px-3.5 rounded-full bg-[#F1F1F2] hover:bg-[#E4E4E6] flex items-center justify-center gap-1.5 text-[13px] font-semibold text-[#161823] cursor-pointer"
                       >
                         <svg viewBox="0 0 20 20" fill="none" className="w-4 h-4 text-[#FE2C55] shrink-0">
@@ -2152,7 +2598,10 @@ export default function App() {
                             strokeLinejoin="round"
                           />
                         </svg>
-                        <span>Offline videos</span>
+                        <span>
+                          Offline videos
+                          {offlineVideosList.length > 0 ? ` (${offlineVideosList.length})` : ''}
+                        </span>
                       </button>
 
                       <button
@@ -2407,6 +2856,350 @@ export default function App() {
             </div>
           )}
 
+          {/* =====================================================================
+              SCREEN 6: TIKTOK EXPLORE PAGE (Category Pills + 2-Column Discovery Grid)
+             ===================================================================== */}
+          {activeScreen === 'explore' && (
+            <div className="w-full max-w-[430px] h-full pb-14 lg:pb-0 bg-white text-[#161823] flex flex-col overflow-hidden">
+              {/* Top Search Bar inside Explore */}
+              <div className="px-3 pt-2.5 pb-1.5 bg-white shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchInput('');
+                    setActiveScreen('search-input');
+                  }}
+                  className="w-full h-9 bg-[#F1F1F2] rounded-lg px-3 flex items-center justify-between text-[#8A8B91] cursor-pointer"
+                >
+                  <div className="flex items-center gap-2">
+                    <svg viewBox="0 0 20 20" fill="none" className="w-4 h-4 text-[#8A8B91]">
+                      <circle cx="9" cy="9" r="6" stroke="currentColor" strokeWidth="2" />
+                      <path d="M13.5 13.5L17 17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    </svg>
+                    <span className="text-[14px]">Search videos, creators, sounds...</span>
+                  </div>
+                  <span className="text-xs font-bold text-[#FE2C55]">Search</span>
+                </button>
+              </div>
+
+              {/* Horizontal Scrollable Category Chips */}
+              <div className="h-10 px-3 border-b border-black/10 flex items-center gap-2 overflow-x-auto no-scrollbar shrink-0 bg-white">
+                {EXPLORE_CATEGORIES.map((cat) => {
+                  const active = exploreCategory === cat.id;
+                  return (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => loadExploreCategory(cat.id)}
+                      className={`px-3.5 py-1.5 rounded-full text-[13px] font-semibold whitespace-nowrap transition-colors cursor-pointer ${
+                        active
+                          ? 'bg-[#161823] text-white'
+                          : 'bg-[#F1F1F2] text-[#56575E] hover:bg-[#E4E4E6]'
+                      }`}
+                    >
+                      {cat.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* 2-Column TikTok Explore Masonry/Card Grid */}
+              <div className="flex-1 overflow-y-auto p-2 bg-white">
+                {isLoadingExplore ? (
+                  <div className="py-16 flex flex-col items-center justify-center">
+                    <div className="w-8 h-8 rounded-full border-2 border-[#FE2C55] border-t-transparent animate-spin mb-2" />
+                    <p className="text-xs text-[#8A8B91]">Loading Explore feed...</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    {(exploreVideos.length > 0 ? exploreVideos : videos).map((vid, idx, arr) => (
+                      <div key={vid.id} className="flex flex-col pb-2">
+                        <div
+                          onClick={() => playVideosListAt(arr, idx)}
+                          className="relative aspect-[3/4] rounded-lg overflow-hidden bg-[#F1F1F2] cursor-pointer"
+                        >
+                          {vid.posterUrl ? (
+                            <img
+                              src={vid.posterUrl}
+                              alt={vid.caption}
+                              loading="lazy"
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <video
+                              src={vid.videoUrl}
+                              className="w-full h-full object-cover"
+                              muted
+                              preload="metadata"
+                            />
+                          )}
+                          <div className="absolute inset-x-0 bottom-0 p-2 bg-gradient-to-t from-black/65 to-transparent flex items-center gap-1">
+                            <svg viewBox="0 0 16 16" fill="none" className="w-3.5 h-3.5 text-white">
+                              <path
+                                d="M4.5 3L12.5 8L4.5 13V3Z"
+                                stroke="currentColor"
+                                strokeWidth="1.6"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                            <span className="text-[11px] font-semibold text-white">
+                              {formatCompactCount(vid.stats.views)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <p
+                          onClick={() => playVideosListAt(arr, idx)}
+                          className="text-[13px] text-[#161823] font-medium line-clamp-2 leading-snug mt-1.5 px-0.5 cursor-pointer"
+                        >
+                          {vid.caption}
+                        </p>
+
+                        <div className="flex items-center justify-between mt-1 px-0.5">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openCreatorProfile(
+                                vid.author.name,
+                                vid.author.handle,
+                                vid.author.avatar || vid.posterUrl || ''
+                              )
+                            }
+                            className="flex items-center gap-1.5 min-w-0 cursor-pointer text-left"
+                          >
+                            {vid.author.avatar ? (
+                              <img
+                                src={vid.author.avatar}
+                                alt={vid.author.name}
+                                referrerPolicy="no-referrer"
+                                className="w-4.5 h-4.5 rounded-full object-cover shrink-0 bg-gray-200"
+                              />
+                            ) : (
+                              <div className="w-4.5 h-4.5 rounded-full bg-gray-300 shrink-0" />
+                            )}
+                            <span className="text-[11.5px] text-[#56575E] truncate hover:underline">
+                              {vid.author.name}
+                            </span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleLikeToggle(vid)}
+                            className="flex items-center gap-1 text-[11.5px] text-[#56575E] shrink-0 cursor-pointer"
+                          >
+                            <svg
+                              viewBox="0 0 20 20"
+                              fill={likedIds[vid.id] ? '#FE2C55' : 'none'}
+                              className={`w-3.5 h-3.5 ${likedIds[vid.id] ? 'text-[#FE2C55]' : ''}`}
+                            >
+                              <path
+                                d="M10 17.2L8.8 16.1C4.5 12.2 1.7 9.6 1.7 6.5C1.7 3.9 3.7 1.9 6.3 1.9C7.7 1.9 9.1 2.6 10 3.6C10.9 2.6 12.3 1.9 13.7 1.9C16.3 1.9 18.3 3.9 18.3 6.5C18.3 9.6 15.5 12.2 11.2 16.1L10 17.2Z"
+                                stroke="currentColor"
+                                strokeWidth="1.6"
+                              />
+                            </svg>
+                            <span>{formatCompactCount(vid.stats.likes)}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* =====================================================================
+              SCREEN 7: REAL TIKTOK INBOX (New Followers, Activity & Suggested Friends!)
+              Does NOT open video comments — shows Followers, Likes Activity & Friends!
+             ===================================================================== */}
+          {activeScreen === 'inbox' && (
+            <div className="w-full max-w-[430px] h-full pb-14 lg:pb-0 bg-white text-[#161823] flex flex-col overflow-y-auto">
+              {/* Top Inbox Bar */}
+              <div className="h-12 px-4 border-b border-black/10 flex items-center justify-between shrink-0 bg-white">
+                <button
+                  type="button"
+                  onClick={() => setIsAccountDrawerOpen(true)}
+                  className="text-[#161823] cursor-pointer"
+                  title="Add Friends"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" className="w-6 h-6">
+                    <circle cx="10" cy="8" r="4" stroke="currentColor" strokeWidth="2" />
+                    <path
+                      d="M3 20c1.6-3.2 4.3-4.5 7-4.5s5.4 1.3 7 4.5"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                    />
+                    <path d="M19 8v6M16 11h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                </button>
+
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[16px] font-bold text-[#161823]">Inbox</span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveScreen('search-input')}
+                  className="text-[#161823] cursor-pointer"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5">
+                    <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
+                    <path d="M16.5 16.5L21 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* System Notification Rows: New Followers & Activity */}
+              <div className="px-4 py-3 space-y-4 border-b border-black/5">
+                {/* New Followers Row */}
+                <div
+                  onClick={() => setActiveScreen('my-profile')}
+                  className="flex items-center justify-between gap-3 cursor-pointer"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-12 h-12 rounded-full bg-[#0095F6] text-white flex items-center justify-center shrink-0">
+                      <svg viewBox="0 0 24 24" fill="none" className="w-6 h-6">
+                        <circle cx="10" cy="8" r="3.5" stroke="white" strokeWidth="2" />
+                        <path
+                          d="M3.5 19.5c1.5-3 4-4.2 6.5-4.2s5 1.2 6.5 4.2"
+                          stroke="white"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                        />
+                        <path d="M19 8v5M16.5 10.5h5" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                      </svg>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-[14.5px] font-bold text-[#161823]">New followers</p>
+                      <p className="text-[12.5px] text-[#8A8B91] truncate">
+                        {profile
+                          ? `${formatCompactCount(profile.followersCount)} followers on ${profile.handle}`
+                          : 'View your followers & friends'}
+                      </p>
+                    </div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-[#FE2C55] text-white text-[11px] font-bold">
+                    {profile ? formatCompactCount(profile.followersCount) : '0'}
+                  </span>
+                </div>
+
+                {/* Activity (Likes & Views on your videos) Row */}
+                <div
+                  onClick={() => setActiveScreen('my-profile')}
+                  className="flex items-center justify-between gap-3 cursor-pointer"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-12 h-12 rounded-full bg-[#FE2C55] text-white flex items-center justify-center shrink-0">
+                      <svg viewBox="0 0 24 24" fill="white" className="w-6 h-6">
+                        <path d="M12 20.5l-1.45-1.32C5.4 14.5 2 11.4 2 7.6 2 4.5 4.4 2 7.5 2c1.74 0 3.41.81 4.5 2.09C13.09 2.81 14.76 2 16.5 2 19.6 2 22 4.5 22 7.6c0 3.8-3.4 6.9-8.55 11.58L12 20.5z" />
+                      </svg>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-[14.5px] font-bold text-[#161823]">Activity</p>
+                      <p className="text-[12.5px] text-[#8A8B91] truncate">
+                        {profile
+                          ? `${profile.likesCount ?? 106} likes & ${myUploadedVideos.reduce(
+                              (s, v) => s + v.stats.views,
+                              0
+                            )} views on your videos`
+                          : 'Likes, favorites and mentions'}
+                      </p>
+                    </div>
+                  </div>
+                  <svg viewBox="0 0 16 16" fill="none" className="w-4 h-4 text-[#8A8B91]">
+                    <path d="M6 3.5L10.5 8 6 12.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  </svg>
+                </div>
+              </div>
+
+              {/* People You May Know / From Your Contacts / Near You (30+ Accounts!) */}
+              <div className="px-4 py-3">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-[13px] font-bold text-[#8A8B91]">
+                    People you may know · From your contacts ({peopleYouMayKnow.length || 30})
+                  </p>
+                </div>
+                <div className="space-y-3.5">
+                  {(peopleYouMayKnow.length > 0
+                    ? peopleYouMayKnow
+                    : Array.from(
+                        new Map(
+                          videos.map((v) => [
+                            v.author.handle.toLowerCase(),
+                            {
+                              name: v.author.name,
+                              handle: v.author.handle.replace(/^@/, ''),
+                              avatar: v.author.avatar || v.posterUrl || '',
+                              followers: Math.round(v.stats.views * 0.05),
+                              badge: 'People you may know',
+                            },
+                          ])
+                        ).values()
+                      )
+                  ).map((creator) => {
+                    const isFollowingCreator = Boolean(
+                      followedHandles[creator.handle] || followedHandles[`@${creator.handle}`]
+                    );
+                    return (
+                      <div
+                        key={creator.handle}
+                        onClick={() =>
+                          openCreatorProfile(creator.name, creator.handle, creator.avatar)
+                        }
+                        className="flex items-center justify-between gap-3 cursor-pointer"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          {creator.avatar ? (
+                            <img
+                              src={creator.avatar}
+                              alt={creator.name}
+                              referrerPolicy="no-referrer"
+                              className="w-12 h-12 rounded-full object-cover bg-gray-200 shrink-0"
+                            />
+                          ) : (
+                            <div className="w-12 h-12 rounded-full bg-[#F1F1F2] flex items-center justify-center font-bold text-sm text-[#161823] shrink-0">
+                              {creator.name.slice(0, 2).toUpperCase()}
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <p className="text-[14px] font-bold text-[#161823] truncate">
+                              {creator.name}
+                            </p>
+                            <p className="text-[12px] text-[#8A8B91] truncate">
+                              @{creator.handle} · {formatCompactCount(creator.followers)} followers
+                            </p>
+                            <p className="text-[11px] font-medium text-[#FE2C55] truncate">
+                              {creator.badge}
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleFollowCreator(creator.handle, creator.name);
+                          }}
+                          className={`px-5 py-1.5 rounded-md text-[13px] font-semibold cursor-pointer shrink-0 ${
+                            isFollowingCreator
+                              ? 'bg-[#F1F1F2] text-[#161823]'
+                              : 'bg-[#FE2C55] text-white'
+                          }`}
+                        >
+                          {isFollowingCreator ? 'Friends' : 'Follow'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Mobile Bottom Navigation Bar (Matches Screenshot 1: Home | Explore | [+] | Inbox | Me) */}
           <nav
             className={`lg:hidden fixed bottom-0 left-0 right-0 h-13 z-30 border-t grid grid-cols-5 items-center px-1 ${
@@ -2443,10 +3236,15 @@ export default function App() {
               type="button"
               onClick={() => {
                 stopAllMediaImmediately();
-                setActiveScreen('search-input');
+                setActiveScreen('explore');
+                if (exploreVideos.length === 0) {
+                  loadExploreCategory('all');
+                }
               }}
               className={`flex flex-col items-center justify-center min-h-[44px] cursor-pointer ${
-                activeScreen === 'search-input' || activeScreen === 'search-results'
+                activeScreen === 'explore' ||
+                activeScreen === 'search-input' ||
+                activeScreen === 'search-results'
                   ? isLightBottomBar
                     ? 'text-[#161823] font-bold'
                     : 'text-white font-bold'
@@ -2455,12 +3253,13 @@ export default function App() {
                   : 'text-white/65'
               }`}
             >
+              {/* Exact Screenshot 1 Explore Logo: 3 Rounded Squares + Magnifying Glass Circle in bottom-right */}
               <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5">
-                <rect x="4" y="4" width="6.5" height="6.5" rx="1.2" stroke="currentColor" strokeWidth="2" />
-                <rect x="13.5" y="4" width="6.5" height="6.5" rx="1.2" stroke="currentColor" strokeWidth="2" />
-                <rect x="4" y="13.5" width="6.5" height="6.5" rx="1.2" stroke="currentColor" strokeWidth="2" />
-                <circle cx="16.5" cy="16.5" r="3" stroke="currentColor" strokeWidth="2" />
-                <path d="M19 19l2 2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="2" />
+                <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="2" />
+                <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="2" />
+                <circle cx="16.5" cy="16.5" r="3.2" stroke="currentColor" strokeWidth="2" />
+                <path d="M19 19l2.2 2.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
               </svg>
               <span className="text-[10px] mt-0.5">Explore</span>
             </button>
@@ -2471,9 +3270,18 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => setIsMobileCommentsOpen(true)}
+              onClick={() => {
+                stopAllMediaImmediately();
+                setActiveScreen('inbox');
+              }}
               className={`relative flex flex-col items-center justify-center min-h-[44px] cursor-pointer ${
-                isLightBottomBar ? 'text-[#8A8B91]' : 'text-white/65'
+                activeScreen === 'inbox'
+                  ? isLightBottomBar
+                    ? 'text-[#161823] font-bold'
+                    : 'text-white font-bold'
+                  : isLightBottomBar
+                  ? 'text-[#8A8B91]'
+                  : 'text-white/65'
               }`}
             >
               <div className="relative">
@@ -2754,6 +3562,119 @@ export default function App() {
         onClose={() => setShareVideo(null)}
         onDownloadNoWatermark={handleDownloadNoWatermark}
       />
+
+      {/* Real TikTok In-App "Offline videos" Modal (Saves inside App CacheStorage — NOT Phone Gallery!) */}
+      {isOfflineModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 backdrop-blur-sm">
+          <div className="w-full max-w-[430px] bg-white text-[#161823] rounded-t-3xl sm:rounded-2xl p-5 shadow-2xl max-h-[85dvh] flex flex-col">
+            <div className="w-10 h-1.5 bg-black/15 rounded-full mx-auto mb-3" />
+            <div className="flex items-center justify-between border-b border-black/10 pb-3">
+              <div>
+                <h3 className="text-[16px] font-bold text-[#161823]">Offline videos</h3>
+                <p className="text-[11.5px] text-[#8A8B91]">
+                  Download videos inside the app to watch anytime without internet (Not saved in phone gallery)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsOfflineModalOpen(false)}
+                className="text-xs font-bold text-[#8A8B91] hover:text-[#161823] cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="py-4 space-y-4 overflow-y-auto">
+              {/* Watch Offline Now Button if videos are already cached */}
+              {offlineVideosList.length > 0 && (
+                <div className="p-3.5 rounded-2xl bg-[#FE2C55]/10 border border-[#FE2C55]/25 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold text-[#161823]">
+                      {offlineVideosList.length} Videos Ready for Offline
+                    </p>
+                    <p className="text-[11px] text-[#8A8B91]">
+                      Works with Wi-Fi & Mobile Data turned OFF
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleWatchOfflineVideosNow}
+                      className="px-4 py-2 rounded-xl bg-[#FE2C55] text-white text-xs font-bold cursor-pointer"
+                    >
+                      ▶ Watch Offline
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleClearOfflineCache}
+                      className="px-2.5 py-2 rounded-xl bg-black/10 text-[#161823] text-[11px] font-semibold cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <p className="text-xs font-bold text-[#161823]">
+                Choose how many videos to save inside app:
+              </p>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                {(
+                  [
+                    { count: 15, time: '~5 min watch time', size: '~15 MB' },
+                    { count: 30, time: '~10 min watch time', size: '~30 MB' },
+                    { count: 50, time: '~18 min watch time', size: '~50 MB' },
+                    { count: 100, time: '~35 min watch time', size: '~95 MB' },
+                  ] as const
+                ).map((opt) => {
+                  const selected = offlineTargetCount === opt.count;
+                  return (
+                    <button
+                      key={opt.count}
+                      type="button"
+                      onClick={() => setOfflineTargetCount(opt.count)}
+                      className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                        selected
+                          ? 'border-[#FE2C55] bg-[#FE2C55]/5'
+                          : 'border-black/10 bg-[#F8F8F9]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-bold text-[#161823]">
+                          {opt.count} videos
+                        </span>
+                        <span
+                          className={`w-4 h-4 rounded-full border flex items-center justify-center ${
+                            selected ? 'border-[#FE2C55] bg-[#FE2C55]' : 'border-black/30'
+                          }`}
+                        >
+                          {selected && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-[#8A8B91] mt-1">{opt.time}</p>
+                      <p className="text-[10.5px] font-semibold text-[#56575E] mt-0.5">
+                        {opt.size} (App Cache Only)
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                disabled={isDownloadingOffline}
+                onClick={() => handleDownloadOfflinePack(offlineTargetCount)}
+                className="w-full py-3.5 rounded-xl bg-[#FE2C55] hover:bg-[#e02449] text-white text-sm font-bold cursor-pointer disabled:opacity-60"
+              >
+                {isDownloadingOffline
+                  ? `Downloading inside app... (${offlineDoneCount} / ${offlineTargetCount})`
+                  : `Download ${offlineTargetCount} Videos for Offline`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

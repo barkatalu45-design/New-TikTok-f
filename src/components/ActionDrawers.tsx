@@ -25,6 +25,7 @@ export interface VideoFeedItem {
   category: string;
   publishedAgo?: string;
   searchHint?: string;
+  socialBadge?: string;
   author: {
     name: string;
     handle: string;
