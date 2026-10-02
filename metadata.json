@@ -1,0 +1,9 @@
+{
+  "name": "TurboTok Lite",
+  "description": "Ultra-fast, low-RAM short video platform powered by a Dual-Engine TikTok and YouTube Shorts stream pipeline, real gallery uploads, no-watermark downloads, and integrated ad monetization.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

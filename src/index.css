@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Syne', sans-serif;
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #090A0F;
+    color: #F8FAFC;
+    overflow: hidden;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.font-mono-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hide scrollbars while keeping smooth snap scrolling */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@keyframes floatHeartUp {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.5) rotate(-8deg);
+  }
+  40% {
+    opacity: 1;
+    transform: translate(-50%, -85%) scale(1.25) rotate(6deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -160%) scale(0.95) rotate(-4deg);
+  }
+}
+
+.animate-heart-burst {
+  animation: floatHeartUp 750ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
